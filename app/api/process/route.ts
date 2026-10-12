@@ -1,0 +1,16 @@
+import { NextResponse } from 'next/server';
+import { processNames } from '@/lib/pipeline';
+
+export const maxDuration = 60;
+
+export async function POST(req: Request) {
+  const { names, llm } = (await req.json().catch(() => ({}))) as { names?: unknown; llm?: string };
+  if (!Array.isArray(names) || names.length > 500 || names.some((n) => typeof n !== 'string' || n.length > 100)) {
+    return NextResponse.json({ error: 'Некорректный список имён' }, { status: 400 });
+  }
+  try {
+    return NextResponse.json({ items: await processNames(names as string[], llm) });
+  } catch (e) {
+    return NextResponse.json({ error: e instanceof Error ? e.message : 'Ошибка обработки' }, { status: 502 });
+  }
+}
