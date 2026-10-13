@@ -3,44 +3,66 @@ import { chat } from './call';
 import { resolveOption, type Option } from './config';
 import { SYSTEM_PROMPT, userPrompt } from './prompt';
 
-export interface LlmResult { stress: number | null; conf: number; failed?: boolean }
+export interface LlmResult { stress: number[]; conf: number; failed?: boolean }
 
-const CHUNK = 30; // имён в одном запросе
-const CONCURRENCY = 3; // запросов одновременно
+const CHUNK = 20; // имён в одном запросе
+const CONCURRENCY = 1; // запросов одновременно
 const CONF = { high: 0.95, medium: 0.65, low: 0.35 } as const;
-const FAIL: LlmResult = { stress: null, conf: 0, failed: true };
+const FAIL: LlmResult = { stress: [], conf: 0, failed: true };
 const cache = new Map<string, LlmResult>(); // повторяющиеся имена не уходят в LLM второй раз
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const cap = (raw: string, r: LlmResult): LlmResult => (/[- ]/.test(raw) ? { ...r, conf: Math.min(r.conf, 0.6) } : r);
-
-/** Случаи, где LLM не нужна: одна гласная, «ё», нет гласных. */
+/** Случаи, где LLM не нужна: одна гласная, «ё», нет гласных. Составные имена всегда спрашиваем у модели. */
 function local(raw: string): LlmResult | null {
   const ch = [...raw];
-  const yo = ch.findIndex((c) => c === 'ё' || c === 'Ё');
-  if (yo >= 0) return cap(raw, { stress: yo, conf: 0.95 });
   const vs = ch.map((c, i) => (isVowel(c) ? i : -1)).filter((i) => i >= 0);
-  if (vs.length === 1) return cap(raw, { stress: vs[0], conf: 0.97 });
-  if (vs.length === 0) return { stress: null, conf: 0.3 };
+  if (vs.length === 0) return { stress: [], conf: 0.3 };
+  if (/[- ]/.test(raw)) return null;
+  const yo = ch.findIndex((c) => c === 'ё' || c === 'Ё');
+  if (yo >= 0) return { stress: [yo], conf: 0.95 };
+  if (vs.length === 1) return { stress: [vs[0]], conf: 0.97 };
   return null;
 }
 
-/** Проверка ответа модели: без «+» строка совпадает с исходной, «+» один и стоит перед гласной. */
+/**
+ * Проверка ответа модели: без «+» строка совпадает с исходной, каждый «+» стоит перед гласной,
+ * в каждой части имени (через дефис или пробел) не больше одного «+».
+ * Если у какой-то части с гласными ударения нет, уверенность понижается до 60% (уйдёт в «Неуверенные»).
+ */
 function parse(raw: string, accented: unknown, confidence: unknown): LlmResult {
   if (typeof accented !== 'string') return FAIL;
   const s = [...accented], r = [...raw];
-  const i = s.indexOf('+');
-  if (i < 0 || s.lastIndexOf('+') !== i) return FAIL;
+  const stress: number[] = [];
+  let pos = 0;
+  for (const c of s) { if (c === '+') stress.push(pos); else pos++; }
+  if (stress.length < 1) return FAIL;
   if (s.filter((c) => c !== '+').join('') !== raw) return FAIL;
-  if (!isVowel(r[i])) return FAIL;
-  return cap(raw, { stress: i, conf: CONF[confidence as keyof typeof CONF] ?? 0.65 });
+  if (!stress.every((i) => isVowel(r[i] ?? ''))) return FAIL;
+
+  let part = 0;
+  const partOf = r.map((c) => (c === '-' || c === ' ' ? ++part : part)); // номер части для каждой буквы
+  const stressed = new Set(stress.map((i) => partOf[i]));
+  if (stressed.size !== stress.length) return FAIL; // два «+» в одной части
+  const vowelParts = new Set(r.map((c, i) => (isVowel(c) ? partOf[i] : -1)).filter((x) => x >= 0));
+  const missing = [...vowelParts].some((pt) => !stressed.has(pt));
+
+  const conf = CONF[confidence as keyof typeof CONF] ?? 0.65;
+  return { stress, conf: missing ? Math.min(conf, 0.6) : conf };
 }
 
 async function askChunk(o: Option, names: string[]): Promise<LlmResult[]> {
   const text = await chat(o, SYSTEM_PROMPT, userPrompt(names));
-  const m = text.replace(/```(?:json)?/g, '').match(/\{[\s\S]*\}/);
+  const clean = text.replace(/<think>[\s\S]*?<\/think>/g, '').replace(/```(?:json)?/g, '');
+  const m = clean.match(/\{[\s\S]*\}/);
   let items: { id?: number; accented?: unknown; confidence?: unknown }[] = [];
-  try { items = JSON.parse(m?.[0] ?? '{}').items ?? []; } catch { /* битый JSON: все записи уйдут на повтор */ }
+  try {
+    items = JSON.parse(m?.[0] ?? '{}').items ?? [];
+  } catch {
+    // битый JSON (обрыв, лишний текст): вытаскиваем записи по шаблону, остальные уйдут на повтор
+    for (const x of clean.matchAll(/"id"\s*:\s*(\d+)\s*,\s*"accented"\s*:\s*"([^"]*)"(?:\s*,\s*"confidence"\s*:\s*"([^"]*)")?/g)) {
+      items.push({ id: Number(x[1]), accented: x[2], confidence: x[3] });
+    }
+  }
   const byId = new Map(items.map((i) => [i.id, i]));
   return names.map((n, k) => { const it = byId.get(k); return it ? parse(n, it.accented, it.confidence) : FAIL; });
 }

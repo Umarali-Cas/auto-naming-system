@@ -3,7 +3,7 @@ export type Status = 'review' | 'uncertain' | 'invalid' | 'sending' | 'sent' | '
 export interface Item {
   raw: string;
   status: Status;
-  stress: number | null; // индекс ударной буквы в raw
+  stress: number[]; // индексы ударных букв в raw (обычно одна; у составных имён можно несколько)
   conf: number; // 0..1
   reason?: string;
 }

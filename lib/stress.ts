@@ -22,19 +22,18 @@ export function check(raw: string): string {
 }
 
 /** Эвристика-заглушка вместо LLM */
-export function guess(n: string): { stress: number | null; conf: number } {
-  if (DICT[n] !== undefined) return { stress: DICT[n], conf: 0.98 };
+export function guess(n: string): { stress: number[]; conf: number } {
+  if (DICT[n] !== undefined) return { stress: [DICT[n]], conf: 0.98 };
   const ch = [...n];
   const vs = ch.map((c, k) => (isVowel(c) ? k : -1)).filter((k) => k >= 0);
   const yo = ch.findIndex((c) => c === 'ё' || c === 'Ё');
-  if (yo >= 0) return { stress: yo, conf: 0.95 };
-  if (vs.length === 1) return { stress: vs[0], conf: 0.97 };
-  if (!vs.length) return { stress: null, conf: 0.3 };
-  return { stress: vs[vs.length - 2], conf: 0.55 + Math.random() * 0.2 };
+  if (yo >= 0) return { stress: [yo], conf: 0.95 };
+  if (vs.length === 1) return { stress: [vs[0]], conf: 0.97 };
+  if (!vs.length) return { stress: [], conf: 0.3 };
+  return { stress: [vs[vs.length - 2]], conf: 0.55 + Math.random() * 0.2 };
 }
 
-/** Ударение: «+» перед ударной буквой, например +Ольга */
-export function fmtName(n: string, i: number | null): string {
-  if (i == null) return n;
-  return [...n].map((c, k) => (k === i ? '+' + c : c)).join('');
+/** Ударение: «+» перед каждой ударной буквой, например +Ольга или +Анна-Мар+ия */
+export function fmtName(n: string, stress: number[]): string {
+  return [...n].map((c, k) => (stress.includes(k) ? '+' + c : c)).join('');
 }

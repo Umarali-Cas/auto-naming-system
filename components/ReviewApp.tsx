@@ -9,14 +9,14 @@ const JSON_HEADERS = { 'Content-Type': 'application/json' };
 const PAGE = 50;
 type Opt = { id: string; label: string };
 
-function Letters({ p, onPick }: { p: Person; onPick: (id: number, i: number | null) => void }) {
+function Letters({ p, onPick }: { p: Person; onPick: (id: number, i: number, add: boolean) => void }) {
   return (
     <>
       {[...p.raw].map((c, k) => {
         if (!isVowel(c)) return <span key={k}>{c}</span>;
-        const on = p.stress === k;
+        const on = p.stress.includes(k);
         return (
-          <b key={k} className={'v' + (on ? ' on' : '')} onClick={() => onPick(p.id, on ? null : k)}>
+          <b key={k} className={'v' + (on ? ' on' : '')} onClick={(e) => onPick(p.id, k, e.shiftKey || e.ctrlKey || e.metaKey)}>
             {on ? '+' : ''}{c}
           </b>
         );
@@ -63,6 +63,8 @@ export default function ReviewApp({ email }: { email: string }) {
   const [opts, setOpts] = useState<Opt[]>([]);
   const [llm, setLlm] = useState('');
   const [error, setError] = useState('');
+  const [newName, setNewName] = useState('');
+  const [multi, setMulti] = useState(false);
 
   const upd = (ids: number[], f: (p: Person) => Partial<Person>) => setP((a) => a.map((p) => (ids.includes(p.id) ? { ...p, ...f(p) } : p)));
   const by = (...s: Person['status'][]) => P.filter((p) => s.includes(p.status));
@@ -81,7 +83,9 @@ export default function ReviewApp({ email }: { email: string }) {
     setBusy('Загрузка и обработка…');
     try {
       const j = await call<{ items: Item[] }>('/api/names?llm=' + encodeURIComponent(model));
-      if (j) setP((a) => [...a, ...j.items.map((i) => ({ ...i, id: nid.current++ }))]);
+      if (!j) return;
+      if (!Array.isArray(j.items)) { setError('Неожиданный ответ /api/names'); return; }
+      setP((a) => [...a, ...j.items.map((i) => ({ ...i, id: nid.current++ }))]);
     } finally { setBusy(''); }
   }
 
@@ -109,10 +113,27 @@ export default function ReviewApp({ email }: { email: string }) {
     const body = JSON.stringify({ items: it.map((p) => ({ id: p.id, name: p.raw, accented: out.get(p.id) })) });
     const r = await fetch('/api/send', { method: 'POST', headers: JSON_HEADERS, body });
     const j = (await r.json().catch(() => ({}))) as { status?: number };
-    upd(it.map((p) => p.id), (p) => ({ status: r.ok ? 'sent' : p.stress === null || p.conf >= 0.7 ? 'review' : 'uncertain', http: j.status }));
+    upd(it.map((p) => p.id), (p) => ({ status: r.ok ? 'sent' : p.stress.length === 0 || p.conf >= 0.7 ? 'review' : 'uncertain', http: j.status }));
   }
 
-  const reject = (ids: number[]) => { upd(ids, () => ({ status: 'rejected' })); setSel(new Set()); };
+  /** Клик по гласной: ударение «перескакивает». Shift/Ctrl+клик или режим «несколько ударений» добавляет/убирает ещё одно. */
+  const pick = (id: number, i: number, add: boolean) => upd([id], (q) => {
+    const has = q.stress.includes(i);
+    const many = add || multi;
+    const next = many
+      ? (has ? q.stress.filter((x) => x !== i) : [...q.stress, i].sort((a, b) => a - b))
+      : (has && q.stress.length === 1 ? [] : [i]);
+    return { stress: next, conf: 1 };
+  });
+
+  // все кнопки «Удалить» проходят через подтверждение
+  const reject = (ids: number[]) => {
+    if (!ids.length) return;
+    const msg = ids.length === 1 ? 'Удалить эту запись?' : `Удалить записи: ${ids.length} шт.?`;
+    if (!window.confirm(`${msg}\nОни уйдут в «История» со статусом «удалено».`)) return;
+    upd(ids, () => ({ status: 'rejected' }));
+    setSel(new Set());
+  };
 
   /** Ошибки: исправленное корректное имя уходит в API (пока заглушка /api/send) и исчезает из списка. */
   async function fix(p: Person, v: string) {
@@ -125,6 +146,20 @@ export default function ReviewApp({ email }: { email: string }) {
     const r = await fetch('/api/send', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ items: [{ id: p.id, name: it.raw, accented: out }] }) });
     const s = (await r.json().catch(() => ({}))) as { status?: number };
     upd([p.id], () => (r.ok ? { status: 'sent', http: s.status } : { status: 'invalid', reason: 'Не удалось отправить, повторите' }));
+  }
+
+  /** Ручное добавление имени: проходит тот же путь (проверка, LLM), что и имена с сервера. */
+  async function addName() {
+    const v = newName.trim();
+    if (!v) return;
+    setBusy('Обработка…');
+    try {
+      const j = await call<{ items: Item[] }>('/api/process', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ names: [v], llm }) });
+      if (!j) return;
+      setP((a) => [...j.items.map((i) => ({ ...i, id: nid.current++ })), ...a]);
+      setNewName('');
+      switchTab(j.items[0].status === 'invalid' ? 'invalid' : j.items[0].status === 'uncertain' ? 'uncertain' : 'review');
+    } finally { setBusy(''); }
   }
 
   async function logout() {
@@ -157,10 +192,15 @@ export default function ReviewApp({ email }: { email: string }) {
             {opts.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
           </select>
         </label>
+        <label className="mu"><input type="checkbox" checked={multi} onChange={(e) => setMulti(e.target.checked)} /> Несколько ударений (или Shift+клик)</label>
         <span className="mu">{busy}</span>
         {opts.length === 1 && <span className="mu">Ключ LLM не задан: работает заглушка. Добавьте GROQ_API_KEY в .env.local.</span>}
       </div>
       {error && <div className="er" role="alert" style={{ marginBottom: 8 }}>{error}</div>}
+      <form className="bar" onSubmit={(e) => { e.preventDefault(); addName(); }}>
+        <input className="t" style={{ maxWidth: 260 }} placeholder="Добавить имя вручную" aria-label="Добавить имя вручную" value={newName} onChange={(e) => setNewName(e.target.value)} />
+        <button className="b" disabled={!!busy || !llm || !newName.trim()}>Добавить</button>
+      </form>
 
       <div className="tabs" role="tablist">
         {tabs.map(([k, label, c]) => (
@@ -191,7 +231,7 @@ export default function ReviewApp({ email }: { email: string }) {
                     <tr key={p.id}>
                       <td><input type="checkbox" aria-label={`Выбрать ${p.raw}`} checked={sel.has(p.id)} onChange={(e) => toggleRow(p.id, e.target.checked)} /></td>
                       <td>{p.raw}</td>
-                      <td className="nm"><Letters p={p} onPick={(id, i) => upd([id], () => ({ stress: i, conf: 1 }))} /></td>
+                      <td className="nm pick"><Letters p={p} onPick={pick} /></td>
                       <td className="mono">{fmtName(p.raw, p.stress)}</td>
                       <td className="mu">{Math.round(p.conf * 100)}%</td>
                       <td className="nw"><button className="b ok sm" onClick={() => accept([p.id])}>Принять</button> <button className="b dn sm" onClick={() => reject([p.id])}>Удалить</button></td>

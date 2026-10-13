@@ -24,3 +24,4 @@ th{font-size:12px;color:var(--mu);font-weight:600}tr.low td{background:var(--wr)
 .empty{padding:28px;text-align:center;color:var(--mu)}
 .pager{display:flex;gap:12px;align-items:center;justify-content:center;margin:12px 0}
 .sm{padding:4px 10px;font-size:13px}
+.pick{user-select:none;-webkit-user-select:none}

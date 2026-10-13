@@ -21,7 +21,7 @@ const e = () => process.env;
 export function providers(): Provider[] {
   const env = e();
   return [
-    { id: 'groq', label: 'Groq', kind: 'openai', baseUrl: env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1', keyEnv: 'GROQ_API_KEY', models: list(env.GROQ_MODELS, 'llama-3.3-70b-versatile,llama-3.1-8b-instant'), jsonMode: true },
+    { id: 'groq', label: 'Groq', kind: 'openai', baseUrl: env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1', keyEnv: 'GROQ_API_KEY', models: list(env.GROQ_MODELS, 'openai/gpt-oss-120b,openai/gpt-oss-20b,qwen/qwen3.6-27b'), jsonMode: env.GROQ_JSON_MODE === '1' },
     { id: 'openai', label: 'OpenAI', kind: 'openai', baseUrl: env.OPENAI_BASE_URL || 'https://api.openai.com/v1', keyEnv: 'OPENAI_API_KEY', models: list(env.OPENAI_MODELS, 'gpt-4o-mini'), jsonMode: true },
     { id: 'anthropic', label: 'Claude', kind: 'anthropic', baseUrl: env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com/v1', keyEnv: 'ANTHROPIC_API_KEY', models: list(env.ANTHROPIC_MODELS, 'claude-haiku-5-5'), jsonMode: false },
     { id: 'custom', label: env.CUSTOM_LLM_LABEL || 'Своя модель', kind: 'openai', baseUrl: (env.CUSTOM_LLM_BASE_URL || '').replace(/\/$/, ''), keyEnv: 'CUSTOM_LLM_API_KEY', models: list(env.CUSTOM_LLM_MODELS, ''), jsonMode: env.CUSTOM_LLM_JSON_MODE === '1' },
