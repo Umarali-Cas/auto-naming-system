@@ -6,6 +6,8 @@ export interface Item {
   stress: number[]; // индексы ударных букв в raw (обычно одна; у составных имён можно несколько)
   conf: number; // 0..1
   reason?: string;
+  original?: string; // исходное написание, если имя автоматически исправлено по словарю (опечатка)
+  note?: string; // пояснение для проверяющего
 }
 export interface Person extends Item {
   id: number;

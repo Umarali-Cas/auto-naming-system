@@ -1,14 +1,16 @@
 import { guess, isVowel } from '../stress';
+import { looksLikeTypo } from '../fuzzy';
 import { chat } from './call';
 import { resolveOption, type Option } from './config';
 import { SYSTEM_PROMPT, userPrompt } from './prompt';
 
-export interface LlmResult { stress: number[]; conf: number; failed?: boolean }
+export interface LlmResult { stress: number[]; conf: number; failed?: boolean; typo?: boolean }
 
-const CHUNK = 20; // имён в одном запросе
+const CHUNK = 30; // имён в одном запросе
 const CONCURRENCY = 1; // запросов одновременно
 const CONF = { high: 0.95, medium: 0.65, low: 0.35 } as const;
 const FAIL: LlmResult = { stress: [], conf: 0, failed: true };
+const TYPO: LlmResult = { stress: [], conf: 0.3, typo: true };
 const cache = new Map<string, LlmResult>(); // повторяющиеся имена не уходят в LLM второй раз
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -54,26 +56,31 @@ async function askChunk(o: Option, names: string[]): Promise<LlmResult[]> {
   const text = await chat(o, SYSTEM_PROMPT, userPrompt(names));
   const clean = text.replace(/<think>[\s\S]*?<\/think>/g, '').replace(/```(?:json)?/g, '');
   const m = clean.match(/\{[\s\S]*\}/);
-  let items: { id?: number; accented?: unknown; confidence?: unknown }[] = [];
+  let items: { id?: number; ok?: unknown; accented?: unknown; confidence?: unknown }[] = [];
   try {
     items = JSON.parse(m?.[0] ?? '{}').items ?? [];
   } catch {
     // битый JSON (обрыв, лишний текст): вытаскиваем записи по шаблону, остальные уйдут на повтор
-    for (const x of clean.matchAll(/"id"\s*:\s*(\d+)\s*,\s*"accented"\s*:\s*"([^"]*)"(?:\s*,\s*"confidence"\s*:\s*"([^"]*)")?/g)) {
-      items.push({ id: Number(x[1]), accented: x[2], confidence: x[3] });
+    for (const x of clean.matchAll(/"id"\s*:\s*(\d+)\s*,\s*(?:"lang"\s*:\s*"[^"]*"\s*,\s*)?(?:"ok"\s*:\s*(true|false)\s*,\s*)?"accented"\s*:\s*"([^"]*)"(?:\s*,\s*"confidence"\s*:\s*"([^"]*)")?/g)) {
+      items.push({ id: Number(x[1]), ok: x[2] !== 'false', accented: x[3], confidence: x[4] });
     }
   }
   const byId = new Map(items.map((i) => [i.id, i]));
-  return names.map((n, k) => { const it = byId.get(k); return it ? parse(n, it.accented, it.confidence) : FAIL; });
+  return names.map((n, k) => {
+    const it = byId.get(k);
+    if (!it) return FAIL;
+    if (it.ok === false) return TYPO; // модель считает, что в имени опечатка
+    return parse(n, it.accented, it.confidence);
+  });
 }
 
-/** Главная функция: ударения для списка имён выбранной моделью (optionId вида "groq:llama-3.3-70b-versatile"). */
+/** Главная функция: ударения для списка имён выбранной моделью (optionId вида "openrouter:qwen/qwen3.8-27b:free"). */
 export async function stressNames(names: string[], optionId?: string): Promise<LlmResult[]> {
   const o = resolveOption(optionId);
 
   if (o.provider.kind === 'stub') {
     await sleep(300);
-    return names.map((n) => (Math.random() < 0.03 ? FAIL : guess(n)));
+    return names.map((n) => (Math.random() < 0.03 ? FAIL : looksLikeTypo(n) ? TYPO : guess(n)));
   }
 
   const res: LlmResult[] = new Array(names.length);

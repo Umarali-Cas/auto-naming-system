@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { processNames } from '@/lib/pipeline';
+import { LlmError } from '@/lib/llm/errors';
 
 export const maxDuration = 60;
 
@@ -11,6 +12,10 @@ export async function POST(req: Request) {
   try {
     return NextResponse.json({ items: await processNames(names as string[], llm) });
   } catch (e) {
+    if (e instanceof LlmError) {
+      const body = { error: e.message, retryable: e.retryable, retryAfterMs: e.retryAfterMs };
+      return NextResponse.json(body, { status: e.retryable ? 503 : 502 });
+    }
     return NextResponse.json({ error: e instanceof Error ? e.message : 'Ошибка обработки' }, { status: 502 });
   }
 }

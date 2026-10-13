@@ -6,8 +6,13 @@ import type { Item, Person } from '@/lib/types';
 
 type Tab = 'review' | 'uncertain' | 'invalid' | 'history';
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
-const PAGE = 50;
+const PAGE = 50; // записей на странице
+const STEP = 30; // имён в одном запросе к LLM
+const GIVE_UP_MS = 5 * 60e3; // если 5 минут нет ни одного успешного ответа, останавливаемся
+const UNPROCESSED = 'Не обработано';
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 type Opt = { id: string; label: string };
+type Prog = { done: number; total: number; label: string };
 
 function Letters({ p, onPick }: { p: Person; onPick: (id: number, i: number, add: boolean) => void }) {
   return (
@@ -60,33 +65,131 @@ export default function ReviewApp({ email }: { email: string }) {
   const [pages, setPages] = useState<Record<Tab, number>>({ review: 1, uncertain: 1, invalid: 1, history: 1 });
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [busy, setBusy] = useState('');
+  const [prog, setProg] = useState<Prog | null>(null);
   const [opts, setOpts] = useState<Opt[]>([]);
   const [llm, setLlm] = useState('');
+  const [llm2, setLlm2] = useState(''); // вторая модель (необязательно): пачка делится между двумя
   const [error, setError] = useState('');
+  const [note, setNote] = useState(''); // спокойное сообщение: ждём лимит модели
   const [newName, setNewName] = useState('');
   const [multi, setMulti] = useState(false);
 
   const upd = (ids: number[], f: (p: Person) => Partial<Person>) => setP((a) => a.map((p) => (ids.includes(p.id) ? { ...p, ...f(p) } : p)));
   const by = (...s: Person['status'][]) => P.filter((p) => s.includes(p.status));
   const R = by('review'), U = by('uncertain'), E = by('invalid'), H = by('sent', 'sending', 'rejected').reverse();
+  const unproc = E.filter((p) => p.reason?.startsWith(UNPROCESSED));
+  const add = (items: Item[]) => {
+    const withIds: Person[] = items.map((i) => ({ ...i, id: nid.current++ }));
+    setP((a) => [...a, ...withIds]);
+  };
 
   async function call<T>(url: string, init?: RequestInit): Promise<T | null> {
-    const r = await fetch(url, init);
-    if (r.status === 401) { router.replace('/login'); return null; }
-    const j = (await r.json().catch(() => ({}))) as { error?: string };
-    if (!r.ok) { setError(j.error ?? 'Ошибка запроса'); return null; }
-    setError('');
-    return j as T;
+    for (let attempt = 0; ; attempt++) {
+      const r = await fetch(url, init);
+      if (r.status === 401) { router.replace('/login'); return null; }
+      const j = (await r.json().catch(() => ({}))) as { error?: string; retryable?: boolean; retryAfterMs?: number };
+      if (r.ok) { setError(''); setNote(''); return j as T; }
+      if (j.retryable && attempt < 4) { // лимит или перегрузка: ждём и повторяем сами
+        const wait = Math.min(Math.max(j.retryAfterMs ?? 5000, 3000), 30000);
+        setNote(`Лимит модели, повтор через ${Math.ceil(wait / 1000)} с…`);
+        await sleep(wait);
+        continue;
+      }
+      setNote('');
+      setError(j.error ?? 'Ошибка запроса');
+      return null;
+    }
   }
 
-  async function load(model = llm) {
-    setBusy('Загрузка и обработка…');
+  /** Один запрос на обработку порции имён выбранной моделью. */
+  async function proc(names: string[], model: string): Promise<{ items?: Item[]; error?: string; unauthorized?: boolean; retryable?: boolean; retryAfterMs?: number }> {
     try {
-      const j = await call<{ items: Item[] }>('/api/names?llm=' + encodeURIComponent(model));
+      const r = await fetch('/api/process', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ names, llm: model }) });
+      if (r.status === 401) { router.replace('/login'); return { error: 'Требуется вход', unauthorized: true }; }
+      const j = (await r.json().catch(() => ({}))) as { items?: Item[]; error?: string; retryable?: boolean; retryAfterMs?: number };
+      if (r.ok && Array.isArray(j.items)) return { items: j.items };
+      // 502/504 от платформы (таймаут функции) тоже считаем временными
+      return { error: j.error ?? `Ошибка запроса (${r.status})`, retryable: j.retryable ?? (r.status === 504 || r.status === 502 && !j.error), retryAfterMs: j.retryAfterMs };
+    } catch {
+      return { error: 'Нет связи с сервером', retryable: true, retryAfterMs: 5000 };
+    }
+  }
+
+  /**
+   * Общая очередь порций. Каждая выбранная модель берёт следующую порцию, как только свободна,
+   * поэтому пачка делится между двумя моделями. При временной ошибке (лимит, перегрузка) порция возвращается
+   * в очередь, модель делает паузу и пробует снова, а пока её может забрать другая модель.
+   * Остановка только при постоянной ошибке (неверный ключ, нет модели) или если 5 минут нет ни одного успеха.
+   */
+  async function runQueue(names: string[], models: string[], options: Opt[]) {
+    const queue: string[][] = [];
+    for (let k = 0; k < names.length; k += STEP) queue.push(names.slice(k, k + STEP));
+    const total = names.length;
+    const counts: Record<string, number> = Object.fromEntries(models.map((m) => [m, 0]));
+    const errs = new Set<string>();
+    const label = (id: string) => options.find((o) => o.id === id)?.label ?? id;
+    let done = 0;
+    let lastOk = Date.now();
+    let unauthorized = false;
+    const report = () => setProg({ done, total, label: models.map((m) => `${label(m)}: ${counts[m]}`).join('    ') });
+    setBusy('LLM обрабатывает пачку…');
+    report();
+
+    const worker = async (model: string) => {
+      while (queue.length && !unauthorized) {
+        const chunk = queue.shift()!;
+        const r = await proc(chunk, model);
+        if (r.unauthorized) { unauthorized = true; return; }
+        if (r.items) {
+          lastOk = Date.now();
+          add(r.items);
+          done += chunk.length;
+          counts[model] += chunk.length;
+          setNote('');
+          report();
+          continue;
+        }
+        queue.unshift(chunk); // порцию может взять другая модель
+        if (r.retryable && Date.now() - lastOk < GIVE_UP_MS) {
+          const wait = Math.min(Math.max(r.retryAfterMs ?? 5000, 3000), 60000);
+          setNote(`${label(model)}: лимит или перегрузка, пауза ${Math.ceil(wait / 1000)} с, затем повтор`);
+          await sleep(wait);
+          continue;
+        }
+        errs.add(`${label(model)}: ${r.error}`);
+        return;
+      }
+    };
+    await Promise.all(models.map(worker));
+
+    if (queue.length && !unauthorized) { // отказали все модели: необработанные не теряем
+      add(queue.flat().map((raw) => ({ raw, status: 'invalid' as const, stress: [], conf: 0, reason: `${UNPROCESSED}: LLM недоступна. Нажмите «Повторить необработанные» во вкладке «Ошибки»` })));
+    }
+    setNote('');
+    setError([...errs].join('\n'));
+  }
+
+  async function load(m1 = llm, m2 = llm2, options = opts) {
+    setBusy('Получение имён…');
+    setProg({ done: 0, total: 0, label: '' });
+    try {
+      const j = await call<{ names?: string[]; items?: Item[] }>('/api/names?llm=' + encodeURIComponent(m1));
       if (!j) return;
-      if (!Array.isArray(j.items)) { setError('Неожиданный ответ /api/names'); return; }
-      setP((a) => [...a, ...j.items.map((i) => ({ ...i, id: nid.current++ }))]);
-    } finally { setBusy(''); }
+      if (Array.isArray(j.items)) { add(j.items); return; } // прежний формат ответа: имена уже обработаны на сервере
+      if (!Array.isArray(j.names)) { setError('Неожиданный ответ /api/names'); return; }
+      await runQueue(j.names, [...new Set([m1, m2].filter(Boolean))], options);
+    } finally { setBusy(''); setProg(null); }
+  }
+
+  /** Повторная обработка записей, которые не удалось обработать (лимиты, недоступность LLM). */
+  async function retryUnprocessed() {
+    if (working || !unproc.length) return;
+    const names = unproc.map((p) => p.raw);
+    setP((a) => a.filter((p) => !(p.status === 'invalid' && p.reason?.startsWith(UNPROCESSED))));
+    setBusy('LLM обрабатывает пачку…');
+    setProg({ done: 0, total: names.length, label: '' });
+    try { await runQueue(names, [...new Set([llm, llm2].filter(Boolean))], opts); }
+    finally { setBusy(''); setProg(null); }
   }
 
   // первая пачка грузится автоматически при открытии страницы
@@ -94,13 +197,18 @@ export default function ReviewApp({ email }: { email: string }) {
     if (started.current) return;
     started.current = true;
     (async () => {
-      const j = await call<{ options: Opt[]; default: string }>('/api/llm');
+      const j = await call<{ options: Opt[]; default: string; default2?: string }>('/api/llm');
       if (!j) return;
       setOpts(j.options);
-      let id = j.default;
-      try { const saved = localStorage.getItem('llm'); if (saved && j.options.some((o) => o.id === saved)) id = saved; } catch { /* нет доступа к storage */ }
-      setLlm(id);
-      await load(id);
+      const ok = (id: string | null) => !!id && j.options.some((o) => o.id === id);
+      let id = j.default, id2 = j.default2 ?? '';
+      try {
+        const s1 = localStorage.getItem('llm'), s2 = localStorage.getItem('llm2');
+        if (ok(s1)) id = s1!;
+        if (s2 !== null && (s2 === '' || ok(s2))) id2 = s2;
+      } catch { /* нет доступа к storage */ }
+      setLlm(id); setLlm2(id2);
+      await load(id, id2, j.options);
     })();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -110,10 +218,10 @@ export default function ReviewApp({ email }: { email: string }) {
     const out = new Map(it.map((p) => [p.id, fmtName(p.raw, p.stress)]));
     upd(it.map((p) => p.id), (p) => ({ status: 'sending', out: out.get(p.id) }));
     setSel(new Set());
-    const body = JSON.stringify({ items: it.map((p) => ({ id: p.id, name: p.raw, accented: out.get(p.id) })) });
+    const body = JSON.stringify({ items: it.map((p) => ({ id: p.id, name: p.raw, original: p.original, accented: out.get(p.id) })) });
     const r = await fetch('/api/send', { method: 'POST', headers: JSON_HEADERS, body });
     const j = (await r.json().catch(() => ({}))) as { status?: number };
-    upd(it.map((p) => p.id), (p) => ({ status: r.ok ? 'sent' : p.stress.length === 0 || p.conf >= 0.7 ? 'review' : 'uncertain', http: j.status }));
+    upd(it.map((p) => p.id), (p) => ({ status: r.ok ? 'sent' : p.original || (p.stress.length > 0 && p.conf < 0.7) ? 'uncertain' : 'review', http: j.status }));
   }
 
   /** Клик по гласной: ударение «перескакивает». Shift/Ctrl+клик или режим «несколько ударений» добавляет/убирает ещё одно. */
@@ -135,12 +243,16 @@ export default function ReviewApp({ email }: { email: string }) {
     setSel(new Set());
   };
 
-  /** Ошибки: исправленное корректное имя уходит в API (пока заглушка /api/send) и исчезает из списка. */
+  /**
+   * Ошибки: исправленное корректное имя уходит в API (пока заглушка /api/send) и исчезает из списка.
+   * Если система нашла в нём опечатку и исправила по словарю, запись идёт в «Неуверенные» на проверку человеком.
+   */
   async function fix(p: Person, v: string) {
     const j = await call<{ items: Item[] }>('/api/process', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ names: [v], llm }) });
     const it = j?.items[0];
     if (!it) return;
     if (it.status === 'invalid') { upd([p.id], () => ({ raw: it.raw, reason: it.reason })); return; }
+    if (it.original) { upd([p.id], () => ({ ...it, reason: undefined })); return; }
     const out = fmtName(it.raw, it.stress);
     upd([p.id], () => ({ ...it, reason: undefined, status: 'sending', out, fixed: true }));
     const r = await fetch('/api/send', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ items: [{ id: p.id, name: it.raw, accented: out }] }) });
@@ -156,9 +268,10 @@ export default function ReviewApp({ email }: { email: string }) {
     try {
       const j = await call<{ items: Item[] }>('/api/process', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ names: [v], llm }) });
       if (!j) return;
-      setP((a) => [...j.items.map((i) => ({ ...i, id: nid.current++ })), ...a]);
+      const withIds: Person[] = j.items.map((i) => ({ ...i, id: nid.current++ }));
+      setP((a) => [...withIds, ...a]);
       setNewName('');
-      switchTab(j.items[0].status === 'invalid' ? 'invalid' : j.items[0].status === 'uncertain' ? 'uncertain' : 'review');
+      switchTab(withIds[0].status === 'invalid' ? 'invalid' : withIds[0].status === 'uncertain' ? 'uncertain' : 'review');
     } finally { setBusy(''); }
   }
 
@@ -167,6 +280,7 @@ export default function ReviewApp({ email }: { email: string }) {
     router.replace('/login'); router.refresh();
   }
 
+  const saveModel = (key: 'llm' | 'llm2', v: string) => { try { localStorage.setItem(key, v); } catch { /* ignore */ } };
   const tabs: [Tab, string, number][] = [['review', 'На проверку', R.length], ['uncertain', 'Неуверенные', U.length], ['invalid', 'Ошибки', E.length], ['history', 'История', H.length]];
   const cur = { review: R, uncertain: U, invalid: E, history: H }[tab];
   const total = cur.length;
@@ -177,29 +291,50 @@ export default function ReviewApp({ email }: { email: string }) {
   const switchTab = (k: Tab) => { setTab(k); setSel(new Set()); };
   const toggleRow = (id: number, on: boolean) => setSel((s) => { const m = new Set(s); if (on) m.add(id); else m.delete(id); return m; });
   const isReview = tab === 'review';
+  const working = !!busy || !!prog;
 
   return (
     <main className="w">
       <header className="top">
-        <div><h1>Расстановка ударений в именах</h1><div className="mu">Демо: сервер и LLM заменены заглушками</div></div>
+        <div><h1>Расстановка ударений в именах</h1><div className="mu">Демо: сервер заменён заглушкой</div></div>
         <div className="mu">{email} <button className="link" onClick={logout}>Выйти</button></div>
       </header>
 
       <div className="bar">
-        <button className="b p" onClick={() => load()} disabled={!!busy || !llm}>Обновить</button>
-        <label className="mu">Модель{' '}
-          <select value={llm} onChange={(e) => { setLlm(e.target.value); try { localStorage.setItem('llm', e.target.value); } catch { /* ignore */ } }}>
+        <button className="b p" onClick={() => load()} disabled={working || !llm}>Обновить</button>
+        <label className="mu">Модель 1{' '}
+          <select value={llm} onChange={(e) => { setLlm(e.target.value); saveModel('llm', e.target.value); }}>
             {opts.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
           </select>
         </label>
+        {opts.length > 1 && (
+          <label className="mu">Модель 2{' '}
+            <select value={llm2} onChange={(e) => { setLlm2(e.target.value); saveModel('llm2', e.target.value); }}>
+              <option value="">без второй модели</option>
+              {opts.filter((o) => o.id !== llm).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+            </select>
+          </label>
+        )}
         <label className="mu"><input type="checkbox" checked={multi} onChange={(e) => setMulti(e.target.checked)} /> Несколько ударений (или Shift+клик)</label>
-        <span className="mu">{busy}</span>
-        {opts.length === 1 && <span className="mu">Ключ LLM не задан: работает заглушка. Добавьте GROQ_API_KEY в .env.local.</span>}
+        {opts.length === 1 && <span className="mu">Ключ LLM не задан: работает заглушка. Добавьте ключ в настройки окружения (см. .env.example).</span>}
       </div>
-      {error && <div className="er" role="alert" style={{ marginBottom: 8 }}>{error}</div>}
+
+      {working && (
+        <div className="prog" role="status" aria-live="polite">
+          <div className="prog-top">
+            <span><i className="dot" />{busy || 'Обработка…'}</span>
+            {prog && prog.total > 0 && <span className="mu">{prog.done} из {prog.total}</span>}
+          </div>
+          <div className="track"><div className={'fill' + (prog && prog.total > 0 ? '' : ' ind')} style={prog && prog.total > 0 ? { width: `${Math.round((prog.done / prog.total) * 100)}%` } : undefined} /></div>
+          {prog?.label && <div className="mu">{prog.label}</div>}
+          {note && <div className="mu">{note}</div>}
+        </div>
+      )}
+      {error && <div className="er" role="alert" style={{ marginBottom: 8, whiteSpace: 'pre-line' }}>{error}</div>}
+
       <form className="bar" onSubmit={(e) => { e.preventDefault(); addName(); }}>
         <input className="t" style={{ maxWidth: 260 }} placeholder="Добавить имя вручную" aria-label="Добавить имя вручную" value={newName} onChange={(e) => setNewName(e.target.value)} />
-        <button className="b" disabled={!!busy || !llm || !newName.trim()}>Добавить</button>
+        <button className="b" disabled={working || !llm || !newName.trim()}>Добавить</button>
       </form>
 
       <div className="tabs" role="tablist">
@@ -219,7 +354,7 @@ export default function ReviewApp({ email }: { email: string }) {
               <button className="b" disabled={!sel.size} onClick={() => accept([...sel])}>Принять выбранные ({sel.size})</button>
               <button className="b dn" disabled={!sel.size} onClick={() => reject([...sel])}>Удалить выбранные</button>
             </div>
-            {!isReview && <div className="mu" style={{ marginBottom: 8 }}>Модель не уверена в этих ударениях. Поправьте вручную (клик по гласной) или примите как есть.</div>}
+            {!isReview && <div className="mu" style={{ marginBottom: 8 }}>Здесь записи, в которых модель не уверена, и имена с возможной опечаткой: для них система предложила исправление по словарю (написано под исходным значением). Проверьте написание и ударение, поправьте клик по гласной или примите.</div>}
             {total ? (
               <>
                 <div className="card"><table>
@@ -230,7 +365,7 @@ export default function ReviewApp({ email }: { email: string }) {
                   <tbody>{rows.map((p) => (
                     <tr key={p.id}>
                       <td><input type="checkbox" aria-label={`Выбрать ${p.raw}`} checked={sel.has(p.id)} onChange={(e) => toggleRow(p.id, e.target.checked)} /></td>
-                      <td>{p.raw}</td>
+                      <td>{p.original ?? p.raw}{p.note && <div className="note">{p.note}</div>}</td>
                       <td className="nm pick"><Letters p={p} onPick={pick} /></td>
                       <td className="mono">{fmtName(p.raw, p.stress)}</td>
                       <td className="mu">{Math.round(p.conf * 100)}%</td>
@@ -245,6 +380,9 @@ export default function ReviewApp({ email }: { email: string }) {
 
         {tab === 'invalid' && (total ? (
           <>
+            {unproc.length > 0 && (
+              <div className="bar"><button className="b p" disabled={working} onClick={retryUnprocessed}>Повторить необработанные ({unproc.length})</button></div>
+            )}
             <div className="card"><table>
               <thead><tr><th>Значение (можно править)</th><th>Причина</th><th /></tr></thead>
               <tbody>{rows.map((p) => <ErrRow key={p.id + p.raw} p={p} onFix={(v) => fix(p, v)} onDel={() => reject([p.id])} />)}</tbody>
