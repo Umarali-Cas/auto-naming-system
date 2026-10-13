@@ -3,7 +3,8 @@ import { processNames } from '@/lib/pipeline';
 import { LlmError } from '@/lib/llm/errors';
 
 export const maxDuration = 60;
-
+export const preferredRegion = 'fra1';
+export const runtime = 'edge';
 export async function POST(req: Request) {
   const { names, llm } = (await req.json().catch(() => ({}))) as { names?: unknown; llm?: string };
   if (!Array.isArray(names) || names.length > 500 || names.some((n) => typeof n !== 'string' || n.length > 100)) {
