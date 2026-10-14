@@ -46,8 +46,8 @@ function EditName({ value, onSave, onCancel }: { value: string; onSave: (v: stri
   const [v, setV] = useState(value);
   const [busy, setBusy] = useState(false);
   return (
-    <form className="nw" onSubmit={async (e) => { e.preventDefault(); setBusy(true); await onSave(v); setBusy(false); }}>
-      <input className="t" style={{ maxWidth: 220 }} autoFocus value={v} aria-label="Новое написание"
+    <form className="edit" onSubmit={async (e) => { e.preventDefault(); setBusy(true); await onSave(v); setBusy(false); }}>
+      <input className="t" autoFocus value={v} aria-label="Новое написание"
         onChange={(e) => setV(e.target.value)} onKeyDown={(e) => { if (e.key === 'Escape') onCancel(); }} />{' '}
       <button className="b p sm" disabled={busy || !v.trim()}>Сохранить</button>{' '}
       <button type="button" className="b sm" disabled={busy} onClick={onCancel}>Отмена</button>
@@ -276,13 +276,13 @@ export default function ReviewApp({ email }: { email: string }) {
   }
 
   /**
-   * «Изменить» или выбор другого написания: новое имя проходит обычную обработку (ударение ставится заново),
+   * «Изменить» или выбор другого написания: имя берётся как есть (без проверки опечаток), ударение ставится заново,
    * запись остаётся во вкладке, исходное написание сохраняется в «Исходное».
    */
   async function respell(p: Person, v: string): Promise<boolean> {
     const name = v.trim();
     if (!name || name === p.raw) return true;
-    const j = await call<{ items: Item[] }>('/api/process', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ names: [name], llm }) });
+    const j = await call<{ items: Item[] }>('/api/process/manual', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ name, llm }) });
     const it = j?.items[0];
     if (!it) return false;
     if (it.status === 'invalid') { setError(`«${name}»: ${it.reason ?? 'не удалось обработать'}`); return false; }
@@ -387,7 +387,7 @@ export default function ReviewApp({ email }: { email: string }) {
               <button className="b" disabled={!sel.size} onClick={() => accept([...sel])}>Принять выбранные ({sel.size})</button>
               <button className="b dn" disabled={!sel.size} onClick={() => reject([...sel])}>Удалить выбранные</button>
             </div>
-            {!isReview && <div className="mu" style={{ marginBottom: 8 }}>Здесь записи, в которых модель не уверена, имена с возможной опечаткой (система предложила исправление по словарю, написано под исходным значением) и имена, переведённые из латиницы. Проверьте написание и ударение: ударение правится кликом по гласной, написание — кнопкой «Изменить» или выбором другого написания.</div>}
+            {!isReview && <div className="mu" style={{ marginBottom: 8 }}>Здесь записи, в которых модель не уверена, имена с возможной опечаткой (модель проверила написание и предложила исправление, оно написано под исходным значением) и имена, переведённые из латиницы. Проверьте написание и ударение: ударение правится кликом по гласной, написание — кнопкой «Изменить» или выбором другого написания.</div>}
             {total ? (
               <>
                 <div className="card"><table>
