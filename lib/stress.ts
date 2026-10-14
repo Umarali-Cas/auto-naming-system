@@ -1,4 +1,4 @@
-const VOWELS = 'аеёиоуыэюяАЕЁИОУЫЭЮЯ';
+const VOWELS = 'аеёиоуыэюяөүАЕЁИОУЫЭЮЯӨҮ'; // ө, ү — кыргызские гласные
 /** Ниже этой уверенности запись попадает во вкладку «Неуверенные» */
 export const CONF_THRESHOLD = 0.7;
 export const isVowel = (c: string) => VOWELS.includes(c);
@@ -17,7 +17,7 @@ export function check(raw: string): string {
   if (/[A-Za-z]/.test(r)) return 'латинские буквы';
   if (/["'«»“”()\[\]{}<>]/.test(r)) return 'кавычки/скобки/теги';
   if (/\d/.test(r)) return 'цифры';
-  if (!/^[А-ЯЁа-яё]+(?:[- ][А-ЯЁа-яё]+)*$/.test(r) || r.length > 60) return 'недопустимые символы';
+  if (!/^[А-ЯЁа-яёӨөҮүҢң]+(?:[- ][А-ЯЁа-яёӨөҮүҢң]+)*$/.test(r) || r.length > 60) return 'недопустимые символы';
   return '';
 }
 

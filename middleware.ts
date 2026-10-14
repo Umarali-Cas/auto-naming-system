@@ -10,4 +10,5 @@ export async function middleware(req: NextRequest) {
     ? NextResponse.json({ error: 'Требуется вход' }, { status: 401 })
     : NextResponse.redirect(new URL('/login', req.url));
 }
-export const config = { matcher: ['/((?!_next|favicon.ico|api/auth).*)'] };
+// models/ — веса модели ударений KG (public/models/kg): их скачивает сам сервер без cookie, секретов там нет
+export const config = { matcher: ['/((?!_next|favicon.ico|api/auth|models/).*)'] };

@@ -11,7 +11,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Некорректный список имён' }, { status: 400 });
   }
   try {
-    return NextResponse.json({ items: await processNames(names as string[], llm) });
+    return NextResponse.json({ items: await processNames(names as string[], llm, new URL(req.url).origin) });
   } catch (e) {
     if (e instanceof LlmError) {
       const body = { error: e.message, retryable: e.retryable, retryAfterMs: e.retryAfterMs };
