@@ -41,6 +41,20 @@ function Pager({ page, pages, total, onPage }: { page: number; pages: number; to
   );
 }
 
+/** Поле «Изменить» для написания имени: Enter или «Сохранить» — применить, Esc или «Отмена» — закрыть. */
+function EditName({ value, onSave, onCancel }: { value: string; onSave: (v: string) => Promise<void>; onCancel: () => void }) {
+  const [v, setV] = useState(value);
+  const [busy, setBusy] = useState(false);
+  return (
+    <form className="nw" onSubmit={async (e) => { e.preventDefault(); setBusy(true); await onSave(v); setBusy(false); }}>
+      <input className="t" style={{ maxWidth: 220 }} autoFocus value={v} aria-label="Новое написание"
+        onChange={(e) => setV(e.target.value)} onKeyDown={(e) => { if (e.key === 'Escape') onCancel(); }} />{' '}
+      <button className="b p sm" disabled={busy || !v.trim()}>Сохранить</button>{' '}
+      <button type="button" className="b sm" disabled={busy} onClick={onCancel}>Отмена</button>
+    </form>
+  );
+}
+
 function ErrRow({ p, onFix, onDel }: { p: Person; onFix: (v: string) => Promise<void>; onDel: () => void }) {
   const [v, setV] = useState(p.raw);
   const [busy, setBusy] = useState(false);
@@ -73,6 +87,7 @@ export default function ReviewApp({ email }: { email: string }) {
   const [note, setNote] = useState(''); // спокойное сообщение: ждём лимит модели
   const [newName, setNewName] = useState('');
   const [multi, setMulti] = useState(false);
+  const [editing, setEditing] = useState<number | null>(null); // id записи, у которой открыто «Изменить»
 
   const upd = (ids: number[], f: (p: Person) => Partial<Person>) => setP((a) => a.map((p) => (ids.includes(p.id) ? { ...p, ...f(p) } : p)));
   const by = (...s: Person['status'][]) => P.filter((p) => s.includes(p.status));
@@ -260,6 +275,24 @@ export default function ReviewApp({ email }: { email: string }) {
     upd([p.id], () => (r.ok ? { status: 'sent', http: s.status } : { status: 'invalid', reason: 'Не удалось отправить, повторите' }));
   }
 
+  /**
+   * «Изменить» или выбор другого написания: новое имя проходит обычную обработку (ударение ставится заново),
+   * запись остаётся во вкладке, исходное написание сохраняется в «Исходное».
+   */
+  async function respell(p: Person, v: string): Promise<boolean> {
+    const name = v.trim();
+    if (!name || name === p.raw) return true;
+    const j = await call<{ items: Item[] }>('/api/process', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ names: [name], llm }) });
+    const it = j?.items[0];
+    if (!it) return false;
+    if (it.status === 'invalid') { setError(`«${name}»: ${it.reason ?? 'не удалось обработать'}`); return false; }
+    upd([p.id], () => ({
+      raw: it.raw, stress: it.stress, conf: it.conf, original: p.original ?? p.raw, alts: undefined, fixed: true,
+      note: [it.note, 'Написание исправлено вручную'].filter(Boolean).join('. '),
+    }));
+    return true;
+  }
+
   /** Ручное добавление имени: проходит тот же путь (проверка, LLM), что и имена с сервера. */
   async function addName() {
     const v = newName.trim();
@@ -354,7 +387,7 @@ export default function ReviewApp({ email }: { email: string }) {
               <button className="b" disabled={!sel.size} onClick={() => accept([...sel])}>Принять выбранные ({sel.size})</button>
               <button className="b dn" disabled={!sel.size} onClick={() => reject([...sel])}>Удалить выбранные</button>
             </div>
-            {!isReview && <div className="mu" style={{ marginBottom: 8 }}>Здесь записи, в которых модель не уверена, и имена с возможной опечаткой: для них система предложила исправление по словарю (написано под исходным значением). Проверьте написание и ударение, поправьте клик по гласной или примите.</div>}
+            {!isReview && <div className="mu" style={{ marginBottom: 8 }}>Здесь записи, в которых модель не уверена, имена с возможной опечаткой (система предложила исправление по словарю, написано под исходным значением) и имена, переведённые из латиницы. Проверьте написание и ударение: ударение правится кликом по гласной, написание — кнопкой «Изменить» или выбором другого написания.</div>}
             {total ? (
               <>
                 <div className="card"><table>
@@ -366,10 +399,23 @@ export default function ReviewApp({ email }: { email: string }) {
                     <tr key={p.id}>
                       <td><input type="checkbox" aria-label={`Выбрать ${p.raw}`} checked={sel.has(p.id)} onChange={(e) => toggleRow(p.id, e.target.checked)} /></td>
                       <td>{p.original ?? p.raw}{p.note && <div className="note">{p.note}</div>}</td>
-                      <td className="nm pick"><Letters p={p} onPick={pick} /></td>
+                      <td className="nm pick">
+                        {editing === p.id
+                          ? <EditName value={p.raw} onCancel={() => setEditing(null)} onSave={async (v) => { if (await respell(p, v)) setEditing(null); }} />
+                          : <Letters p={p} onPick={pick} />}
+                        {editing !== p.id && !!p.alts?.length && (
+                          <div className="note">другие написания:{' '}
+                            {p.alts.map((a) => <button key={a} className="b sm" disabled={working} onClick={() => respell(p, a)}>{a}</button>)}
+                          </div>
+                        )}
+                      </td>
                       <td className="mono">{fmtName(p.raw, p.stress)}</td>
                       <td className="mu">{Math.round(p.conf * 100)}%</td>
-                      <td className="nw"><button className="b ok sm" onClick={() => accept([p.id])}>Принять</button> <button className="b dn sm" onClick={() => reject([p.id])}>Удалить</button></td>
+                      <td className="nw">
+                        <button className="b ok sm" onClick={() => accept([p.id])}>Принять</button>{' '}
+                        <button className="b sm" disabled={editing === p.id} onClick={() => setEditing(p.id)}>Изменить</button>{' '}
+                        <button className="b dn sm" onClick={() => reject([p.id])}>Удалить</button>
+                      </td>
                     </tr>))}</tbody>
                 </table></div>
                 {pager}

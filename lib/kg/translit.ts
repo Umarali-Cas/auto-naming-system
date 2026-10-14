@@ -83,20 +83,26 @@ export class Translit {
     return { text: cands[0][0], p: 1 / z, alts: cands.slice(1, 4).map(([c]) => c) };
   }
 
-  /** Имя целиком (части через дефис или пробел); заглавная первая буква части сохраняется. */
+  /**
+   * Имя целиком (части через дефис или пробел); заглавная первая буква части сохраняется.
+   * alts — полные варианты имени: в лучшем написании заменена одна часть, начиная с самой сомнительной.
+   */
   name(raw: string): TranslitResult {
-    let p = 1;
-    const alts: string[] = [];
-    const text = raw.split(/([- ]+)/).map((part) => {
-      if (!part || /^[- ]+$/.test(part)) return part;
+    const parts = raw.split(/([- ]+)/).map((part) => {
+      if (!part || /^[- ]+$/.test(part)) return { sep: part };
       const r = this.word(part);
-      p = Math.min(p, r.p);
       const cap = part[0] !== part[0].toLowerCase();
       const fix = (s: string) => (cap ? s[0].toUpperCase() + s.slice(1) : s);
-      alts.push(...r.alts.map(fix));
-      return fix(r.text);
-    }).join('');
-    return { text, p, alts };
+      return { text: fix(r.text), p: r.p, alts: r.alts.map(fix) };
+    });
+    const words = parts.filter((x): x is { text: string; p: number; alts: string[] } => 'text' in x);
+    const text = parts.map((x) => ('sep' in x ? x.sep : x.text)).join('');
+    const p = words.reduce((m, x) => Math.min(m, x.p), 1);
+    const alts: string[] = [];
+    for (const w of [...words].sort((a, b) => a.p - b.p)) {
+      for (const a of w.alts) alts.push(parts.map((x) => ('sep' in x ? x.sep : x === w ? a : x.text)).join(''));
+    }
+    return { text, p, alts: alts.slice(0, 4) };
   }
 }
 
