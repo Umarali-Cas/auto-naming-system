@@ -17,5 +17,6 @@ export async function fetchNames(count = 200): Promise<string[]> {
   while (out.length < count) out.push(rnd(POOL));
   // return out.sort(() => Math.random() - 0.5);
   const shuffled = out.sort(() => Math.random() - 0.5);
-  return [...TEST_NAMES, ...shuffled]; //
+  // return [...TEST_NAMES, ...shuffled]; //
+  return [...TEST_NAMES]; //
 }

@@ -37,3 +37,8 @@ th{font-size:12px;color:var(--mu);font-weight:600}tr.low td{background:var(--wr)
 @keyframes shimmer{from{background-position:200% 0}to{background-position:-200% 0}}
 @keyframes slide{from{margin-left:0}to{margin-left:65%}}
 @media (prefers-reduced-motion:reduce){.dot,.fill,.fill.ind{animation:none}}
+/* форма «Изменить»: поле на всю ширину ячейки, кнопки переносятся на новую строку и не перекрывают текст */
+.edit{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-width:230px;white-space:normal}
+.edit .t{flex:0 0 200px;width:auto;min-width:0;font-size:16px}
+.edit .b{flex:0 0 200px}
+.pick input{user-select:text;-webkit-user-select:text}
