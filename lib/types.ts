@@ -8,6 +8,7 @@ export interface Item {
   reason?: string;
   original?: string; // исходное написание, если имя автоматически исправлено по словарю (опечатка)
   note?: string; // пояснение для проверяющего
+  alts?: string[]; // другие возможные написания (перевод из латиницы): выбираются кнопкой
 }
 export interface Person extends Item {
   id: number;

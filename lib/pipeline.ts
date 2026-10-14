@@ -45,11 +45,12 @@ export async function processNames(names: string[], llm?: string, origin?: strin
     if (r.failed) out[i] = bad(raw, LLM_FAIL);
     else if (r.typo) typos.push(k);
     else if (t) {
-      const alts = t.alts.length && t.p < TRANSLIT_THRESHOLD ? `, другие написания: ${t.alts.join(', ')}` : '';
+      const doubt = t.p < TRANSLIT_THRESHOLD;
       out[i] = {
         raw, original: names[i].trim(), stress: r.stress, conf: Math.min(r.conf, t.p),
-        status: isUncertain(r) || t.p < TRANSLIT_THRESHOLD ? 'uncertain' : 'review',
-        note: joinNotes(`Переведено из латиницы (уверенность ${Math.round(t.p * 100)}%${alts})`, r.note),
+        status: isUncertain(r) || doubt ? 'uncertain' : 'review',
+        note: joinNotes(`Переведено из латиницы (уверенность ${Math.round(t.p * 100)}%)`, r.note),
+        alts: doubt && t.alts.length ? t.alts : undefined,
       };
     } else out[i] = { raw, status: isUncertain(r) ? 'uncertain' : 'review', stress: r.stress, conf: r.conf, note: r.note };
   });
