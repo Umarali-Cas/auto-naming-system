@@ -1,10 +1,13 @@
-import { guess, isVowel } from '../stress';
+import { fmtName, guess, isVowel } from '../stress';
 import { looksLikeTypo } from '../fuzzy';
+import { KG_CONF_THRESHOLD, loadKg, stressRaw } from '../kg';
 import { chat } from './call';
-import { resolveOption, type Option } from './config';
+import { hybridLlm, listOptions, resolveOption, type Option } from './config';
+import { LlmError } from './errors';
 import { SYSTEM_PROMPT, userPrompt } from './prompt';
 
-export interface LlmResult { stress: number[]; conf: number; failed?: boolean; typo?: boolean }
+/** uncertain — решение источника, если у него своя шкала уверенности (модель KG); note — пояснение для проверяющего. */
+export interface LlmResult { stress: number[]; conf: number; failed?: boolean; typo?: boolean; uncertain?: boolean; note?: string }
 
 const CHUNK = 30; // имён в одном запросе
 const CONCURRENCY = 1; // запросов одновременно
@@ -74,9 +77,50 @@ async function askChunk(o: Option, names: string[]): Promise<LlmResult[]> {
   });
 }
 
-/** Главная функция: ударения для списка имён выбранной моделью (optionId вида "openrouter:qwen/qwen3.8-27b:free"). */
-export async function stressNames(names: string[], optionId?: string): Promise<LlmResult[]> {
+const sameStress = (a: number[], b: number[]) => a.length === b.length && a.every((x, i) => x === b[i]);
+
+/**
+ * Модель KG: ударение для всех имён. В режиме hybrid имена ниже порога KG_CONF_THRESHOLD дополнительно
+ * отправляются в LLM: совпало — запись уходит «На проверку», не совпало — остаётся в «Неуверенных»
+ * с вариантом LLM в пояснении. Если LLM недоступна, остаются ответы своей модели.
+ */
+async function kgStressNames(names: string[], o: Option, origin?: string): Promise<LlmResult[]> {
+  if (!origin) throw new LlmError('Модель KG: не передан адрес сайта для загрузки весов');
+  const { model } = await loadKg(origin);
+  const res: LlmResult[] = names.map((n) => {
+    const r = stressRaw(model, n);
+    return { ...r, uncertain: r.conf < KG_CONF_THRESHOLD };
+  });
+  if (o.model !== 'hybrid') return res;
+
+  const llm = hybridLlm(listOptions().filter((x) => x.provider.kind !== 'stub' && x.provider.kind !== 'kg'));
+  const doubt = res.map((r, i) => (r.uncertain ? i : -1)).filter((i) => i >= 0);
+  if (!llm || !doubt.length) return res;
+  let second: LlmResult[];
+  try {
+    second = await stressNames(doubt.map((i) => names[i]), llm.id);
+  } catch {
+    doubt.forEach((i) => { res[i].note = 'LLM для сверки сейчас недоступна'; });
+    return res;
+  }
+  doubt.forEach((i, k) => {
+    const a = res[i], b = second[k];
+    if (b.failed) a.note = 'LLM для сверки не ответила';
+    else if (b.typo) a.note = 'LLM считает, что в имени возможна опечатка';
+    else if (sameStress(a.stress, b.stress)) { a.uncertain = false; a.note = 'Совпало с LLM'; }
+    else a.note = `LLM предлагает: ${fmtName(names[i], b.stress)}`;
+  });
+  return res;
+}
+
+/**
+ * Главная функция: ударения для списка имён выбранной моделью (optionId вида "openrouter:qwen/qwen3.8-27b:free").
+ * origin — адрес сайта, нужен модели KG, чтобы скачать веса из public/models/kg.
+ */
+export async function stressNames(names: string[], optionId?: string, origin?: string): Promise<LlmResult[]> {
   const o = resolveOption(optionId);
+
+  if (o.provider.kind === 'kg') return kgStressNames(names, o, origin);
 
   if (o.provider.kind === 'stub') {
     await sleep(300);

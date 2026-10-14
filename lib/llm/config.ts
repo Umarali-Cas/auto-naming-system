@@ -4,7 +4,7 @@
  */
 import { keysOf } from './keys';
 
-export type Kind = 'openai' | 'anthropic' | 'stub';
+export type Kind = 'openai' | 'anthropic' | 'stub' | 'kg';
 
 export interface Provider {
   id: string;
@@ -34,7 +34,19 @@ export function providers(): Provider[] {
 const STUB_PROVIDER: Provider = { id: 'stub', label: 'Заглушка', kind: 'stub', baseUrl: '', keyEnv: '', models: ['без LLM'], jsonMode: false };
 const STUB: Option = { id: 'stub:none', label: 'Заглушка (без LLM)', provider: STUB_PROVIDER, model: 'none' };
 
-/** Доступные варианты: настроенные провайдеры + заглушка (всегда последней). */
+/**
+ * Модель ударений KG (lib/kg): работает без ключей и без внешних запросов.
+ * kg:bilstm — только своя модель; kg:hybrid — своя модель, а имена ниже её порога уверенности
+ * дополнительно спрашиваются у LLM (KG_HYBRID_LLM или первая настроенная) для сверки.
+ */
+const KG_PROVIDER: Provider = { id: 'kg', label: 'Модель ударений KG', kind: 'kg', baseUrl: '', keyEnv: '', models: ['bilstm', 'hybrid'], jsonMode: false };
+
+/** LLM, которой гибрид отдаёт сомнительные имена. */
+export function hybridLlm(llms: Option[]): Option | undefined {
+  return llms.find((o) => o.id === process.env.KG_HYBRID_LLM) ?? llms[0];
+}
+
+/** Доступные варианты: настроенные провайдеры, модель KG, заглушка (всегда последней). */
 export function listOptions(): Option[] {
   const out: Option[] = [];
   for (const p of providers()) {
@@ -43,6 +55,9 @@ export function listOptions(): Option[] {
     const suffix = n > 1 ? ` [ключей: ${n}]` : '';
     if (ready) p.models.forEach((m) => out.push({ id: `${p.id}:${m}`, label: `${p.label}: ${m}${suffix}`, provider: p, model: m }));
   }
+  const h = hybridLlm(out);
+  out.push({ id: 'kg:bilstm', label: 'Модель ударений KG (без LLM)', provider: KG_PROVIDER, model: 'bilstm' });
+  if (h) out.push({ id: 'kg:hybrid', label: `Модель ударений KG + ${h.label} для сомнительных`, provider: KG_PROVIDER, model: 'hybrid' });
   out.push(STUB);
   return out;
 }
