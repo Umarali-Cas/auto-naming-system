@@ -1,14 +1,18 @@
 /**
- * Посимвольная BiLSTM для ударений в именах (обучена на 215 тыс. размеченных имён, фамилий и отчеств KG).
+ * Посимвольная BiLSTM для ударений в именах. Одна общая модель для Кыргызстана и Казахстана:
+ * обучена на 215 тыс. имён KG и 880 тыс. имён KZ, страна передаётся служебным символом перед словом.
  * Веса: public/models/kg/weights.json (float16 в base64). Расчёт на чистом JS, без зависимостей,
  * поэтому работает и в edge-рантайме, и в Node, и в браузере.
  */
-export const KG_VOWELS = new Set([...'аеёиоуыэюяөү']);
+export const KG_VOWELS = new Set([...'аәеёиіоөуұүыэюя']);
+export type Country = 'kg' | 'kz';
 
 interface Tensor { shape: number[]; d: Float32Array }
 export interface WeightsFile {
   cfg: { emb: number; hidden: number; layers: number };
   stoi: Record<string, number>;
+  tags?: Record<string, string>; // метка страны: символ, который ставится перед словом
+  vowels?: string;
   w: Record<string, { shape: number[]; b64: string }>;
 }
 
@@ -31,11 +35,14 @@ const sig = (x: number) => 1 / (1 + Math.exp(-x));
 export class StressModel {
   private P: Record<string, Tensor> = {};
   private stoi: Record<string, number>;
+  private tags: Record<string, string>;
   private H: number;
   private E: number;
+  readonly vowels: Set<string>;
 
   constructor(w: WeightsFile) {
-    this.stoi = w.stoi; this.H = w.cfg.hidden; this.E = w.cfg.emb;
+    this.stoi = w.stoi; this.H = w.cfg.hidden; this.E = w.cfg.emb; this.tags = w.tags ?? {};
+    this.vowels = w.vowels ? new Set([...w.vowels]) : KG_VOWELS;
     for (const [k, v] of Object.entries(w.w)) this.P[k] = { shape: v.shape, d: decode(v.b64) };
   }
 
@@ -62,8 +69,17 @@ export class StressModel {
     return out;
   }
 
-  /** Вероятность ударения на каждом символе слова в нижнем регистре (у согласных 0). Слово без дефисов и пробелов. */
-  probs(word: string): number[] {
+  /**
+   * Вероятность ударения на каждом символе слова в нижнем регистре (у согласных 0). Слово без дефисов и пробелов.
+   * country — правила какой страны применять (метка ставится перед словом, в ответе её позиции нет).
+   */
+  probs(word: string, country: Country = 'kg'): number[] {
+    const tag = this.tags[country] ?? '';
+    const p = this.rawProbs(tag + word);
+    return tag ? p.slice([...tag].length) : p;
+  }
+
+  private rawProbs(word: string): number[] {
     const H = this.H, E = this.E, emb = this.P['emb.weight'].d, chars = [...word];
     let xs = chars.map((ch) => { const id = this.stoi[ch] ?? 1; return emb.subarray(id * E, (id + 1) * E); });
     for (const layer of ['l0', 'l1']) {
@@ -72,7 +88,7 @@ export class StressModel {
     }
     const ow = this.P['out.weight'].d, ob = this.P['out.bias'].d[0];
     const logits = xs.map((x, i) => {
-      if (!KG_VOWELS.has(chars[i])) return -Infinity;
+      if (!this.vowels.has(chars[i])) return -Infinity;
       let s = ob; for (let j = 0; j < x.length; j++) s += ow[j] * x[j];
       return s;
     });
